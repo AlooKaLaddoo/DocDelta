@@ -10,3 +10,5 @@ fuzzywuzzy
 python-docx
 fpdf
 pdfplumber
+python-Levenshtein
+logging
