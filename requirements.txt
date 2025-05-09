@@ -1,0 +1,12 @@
+argparse
+opencv-python
+numpy
+pytesseract
+easyocr
+pdf2image
+Pillow
+jinja2
+fuzzywuzzy
+python-docx
+fpdf
+pdfplumber
