@@ -1,14 +1,2 @@
-argparse
-opencv-python
-numpy
-pytesseract
-easyocr
-pdf2image
-Pillow
-jinja2
-fuzzywuzzy
-python-docx
-fpdf
-pdfplumber
-python-Levenshtein
-logging
+PyMuPDF>=1.23.0
+Pillow>=10.0.0

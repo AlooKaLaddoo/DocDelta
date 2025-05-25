@@ -1,3 +1,5 @@
 /fileComparison
 /1_*
 /2_*
+/temp
+/__pycache__
