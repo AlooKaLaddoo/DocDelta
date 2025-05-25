@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Advanced PDF Comparison Tool
-Converts PDFs to images, extracts text with positions, and marks visual differences
+Advanced Document Comparison Tool
+Converts various document formats (PDF, DOCX, XLSX, PPTX) to images, extracts text with positions, and marks visual differences
 """
 
 import sys
@@ -17,6 +17,31 @@ import html
 from PIL import Image, ImageDraw, ImageFont
 import base64
 import io
+import tempfile
+import shutil
+
+# Document format conversion imports
+try:
+    from docx import Document
+except ImportError:
+    Document = None
+
+try:
+    import openpyxl
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+except ImportError:
+    openpyxl = None
+    canvas = None
+    
+try:
+    from pptx import Presentation
+except ImportError:
+    Presentation = None
 
 
 class TextBlock:
@@ -34,11 +59,11 @@ class TextBlock:
         return f"TextBlock('{self.text[:20]}...', page={self.page_num}, bbox={self.bbox})"
 
 
-class PDFComparator:
-    """Advanced PDF comparison with visual annotations."""
+class DocumentComparator:
+    """Advanced document comparison with visual annotations. Supports PDF, DOCX, XLSX, PPTX formats."""
     
     def __init__(self):
-        self.dpi = 150  # Resolution for PDF to image conversion
+        self.dpi = 150  # Resolution for document to image conversion
         self.temp_dir = Path("temp")
         self.temp_dir.mkdir(exist_ok=True)
         
@@ -46,6 +71,157 @@ class PDFComparator:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.comparison_dir = self.temp_dir / f"compare_{timestamp}"
         self.comparison_dir.mkdir(exist_ok=True)
+        
+        # Create temp directory for intermediate files
+        self.temp_conversion_dir = self.comparison_dir / "temp_conversions"
+        self.temp_conversion_dir.mkdir(exist_ok=True)
+        
+    def get_file_type(self, file_path: str) -> str:
+        """Determine the file type based on extension."""
+        path = Path(file_path)
+        extension = path.suffix.lower()
+        
+        if extension == '.pdf':
+            return 'pdf'
+        elif extension in ['.docx', '.doc']:
+            return 'docx'
+        elif extension in ['.xlsx', '.xls']:
+            return 'xlsx'
+        elif extension in ['.pptx', '.ppt']:
+            return 'pptx'
+        else:
+            raise ValueError(f"Unsupported file format: {extension}")
+    
+    def convert_docx_to_pdf(self, docx_path: str) -> str:
+        """Convert DOCX file to PDF."""
+        if Document is None:
+            raise ImportError("python-docx package is required for DOCX support. Install with: pip install python-docx")
+        
+        print(f"Converting DOCX to PDF: {docx_path}")
+        
+        # Try using python-docx with reportlab for conversion
+        doc = Document(docx_path)
+        pdf_path = self.temp_conversion_dir / f"{Path(docx_path).stem}_converted.pdf"
+        
+        # Create PDF using reportlab
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.pagesizes import letter
+        
+        doc_pdf = SimpleDocTemplate(str(pdf_path), pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = []
+        
+        for paragraph in doc.paragraphs:
+            if paragraph.text.strip():
+                p = Paragraph(paragraph.text, styles['Normal'])
+                story.append(p)
+                story.append(Spacer(1, 12))
+        
+        doc_pdf.build(story)
+        return str(pdf_path)
+    
+    def convert_xlsx_to_pdf(self, xlsx_path: str) -> str:
+        """Convert XLSX file to PDF."""
+        if openpyxl is None:
+            raise ImportError("openpyxl and reportlab packages are required for XLSX support. Install with: pip install openpyxl reportlab")
+        
+        print(f"Converting XLSX to PDF: {xlsx_path}")
+        
+        wb = openpyxl.load_workbook(xlsx_path)
+        pdf_path = self.temp_conversion_dir / f"{Path(xlsx_path).stem}_converted.pdf"
+        
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.lib import colors
+        
+        doc = SimpleDocTemplate(str(pdf_path), pagesize=landscape(letter))
+        story = []
+        
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            
+            # Convert sheet data to list of lists
+            data = []
+            for row in ws.iter_rows(values_only=True):
+                data.append([str(cell) if cell is not None else '' for cell in row])
+            
+            if data:
+                # Create table
+                table = Table(data)
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 14),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                story.append(table)
+        
+        doc.build(story)
+        return str(pdf_path)
+    
+    def convert_pptx_to_pdf(self, pptx_path: str) -> str:
+        """Convert PPTX file to PDF."""
+        if Presentation is None:
+            raise ImportError("python-pptx package is required for PPTX support. Install with: pip install python-pptx")
+        
+        print(f"Converting PPTX to PDF: {pptx_path}")
+        
+        prs = Presentation(pptx_path)
+        pdf_path = self.temp_conversion_dir / f"{Path(pptx_path).stem}_converted.pdf"
+        
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.pagesizes import letter
+        
+        doc = SimpleDocTemplate(str(pdf_path), pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = []
+        
+        for i, slide in enumerate(prs.slides):
+            story.append(Paragraph(f"Slide {i+1}", styles['Heading1']))
+            story.append(Spacer(1, 12))
+            
+            for shape in slide.shapes:
+                try:
+                    # Try to get text from different shape types
+                    text = ""
+                    if hasattr(shape, 'text_frame') and shape.text_frame:
+                        text = shape.text_frame.text.strip()
+                    elif hasattr(shape, 'text'):
+                        text = shape.text.strip()
+                    
+                    if text:
+                        p = Paragraph(text, styles['Normal'])
+                        story.append(p)
+                        story.append(Spacer(1, 6))
+                except AttributeError:
+                    # Skip shapes that don't have text
+                    continue
+            
+            story.append(Spacer(1, 24))
+        
+        doc.build(story)
+        return str(pdf_path)
+    
+    def convert_to_pdf(self, file_path: str) -> str:
+        """Convert various document formats to PDF."""
+        file_type = self.get_file_type(file_path)
+        
+        if file_type == 'pdf':
+            return file_path  # Already PDF
+        elif file_type == 'docx':
+            return self.convert_docx_to_pdf(file_path)
+        elif file_type == 'xlsx':
+            return self.convert_xlsx_to_pdf(file_path)
+        elif file_type == 'pptx':
+            return self.convert_pptx_to_pdf(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
         
     def pdf_to_images(self, pdf_path: str) -> List[Image.Image]:
         """Convert PDF pages to PIL Images."""
@@ -752,7 +928,7 @@ class PDFComparator:
 <body>
     <div class="container">
         <div class="header">
-            <h1>PDF Comparison Report</h1>
+            <h1>Document Comparison Report</h1>
             <p>Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}</p>
         </div>
         
@@ -869,35 +1045,39 @@ class PDFComparator:
         
         return html_content
     
-    def compare_pdfs(self, pdf1_path: str, pdf2_path: str):
-        """Main comparison method."""
-        print("Starting PDF comparison...")
+    def compare_pdfs(self, file1_path: str, file2_path: str):
+        """Main comparison method for documents (PDF, DOCX, XLSX, PPTX)."""
+        print("Starting document comparison...")
         
-        # Step 1: Convert PDFs to images
+        # Step 1: Convert documents to PDF if needed
+        pdf1_path = self.convert_to_pdf(file1_path)
+        pdf2_path = self.convert_to_pdf(file2_path)
+        
+        # Step 2: Convert PDFs to images
         images1 = self.pdf_to_images(pdf1_path)
         images2 = self.pdf_to_images(pdf2_path)
         
-        # Step 2: Extract text blocks with positions
+        # Step 3: Extract text blocks with positions
         blocks1 = self.extract_text_blocks(pdf1_path)
         blocks2 = self.extract_text_blocks(pdf2_path)
         
-        # Step 3: Pad shorter PDF with empty pages
+        # Step 4: Pad shorter PDF with empty pages
         images1, images2, blocks1, blocks2 = self.pad_images_and_blocks(
             images1, images2, blocks1, blocks2)
         
-        # Step 4: Find text differences
+        # Step 5: Find text differences
         differences = self.find_text_differences(blocks1, blocks2)
         
-        # Step 5: Annotate images with differences
+        # Step 6: Annotate images with differences
         annotated1, annotated2 = self.annotate_images(images1, images2, differences)
         
-        # Step 6: Convert images to base64 for HTML
+        # Step 7: Convert images to base64 for HTML
         images1_b64 = self.save_images_to_base64(annotated1, "original")
         images2_b64 = self.save_images_to_base64(annotated2, "modified")
         
-        # Step 7: Generate HTML report
+        # Step 8: Generate HTML report
         html_content = self.generate_html_report(
-            pdf1_path, pdf2_path, images1_b64, images2_b64, differences)
+            file1_path, file2_path, images1_b64, images2_b64, differences)
         
         # Step 8: Save HTML report
         report_path = self.comparison_dir / "comparison_report.html"
@@ -905,7 +1085,7 @@ class PDFComparator:
             f.write(html_content)
         
         print(f"\n{'='*60}")
-        print("PDF COMPARISON COMPLETE")
+        print("DOCUMENT COMPARISON COMPLETE")
         print(f"{'='*60}")
         print(f"Comparison folder: {self.comparison_dir}")
         print(f"Report saved: {report_path}")
@@ -921,27 +1101,32 @@ class PDFComparator:
 def main():
     """Main function with CLI interface."""
     parser = argparse.ArgumentParser(
-        description="Advanced PDF comparison tool with visual annotations",
+        description="Advanced Document Comparison Tool with visual annotations - supports PDF, DOCX, XLSX, PPTX",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
     python doc_compare.py file1.pdf file2.pdf
+    python doc_compare.py document1.docx document2.docx
+    python doc_compare.py spreadsheet1.xlsx spreadsheet2.xlsx
+    python doc_compare.py presentation1.pptx presentation2.pptx
+    python doc_compare.py file1.docx file2.pdf
     
 The tool will:
-1. Convert PDFs to high-resolution images
-2. Extract text with position information
-3. Pad shorter PDF with empty pages
-4. Find content differences (ignoring layout-only changes)
-5. Mark changes on images with colors:
+1. Convert documents to PDF format if needed (DOCX, XLSX, PPTX)
+2. Convert PDFs to high-resolution images
+3. Extract text with position information
+4. Pad shorter document with empty pages
+5. Find content differences (ignoring layout-only changes)
+6. Mark changes on images with colors:
    - Red: Deletions
    - Green: Insertions  
    - Orange: Modifications
-6. Generate HTML report in temp/ directory
+7. Generate HTML report in temp/ directory
         """
     )
     
-    parser.add_argument('file1', help='Path to the first PDF file (original)')
-    parser.add_argument('file2', help='Path to the second PDF file (modified)')
+    parser.add_argument('file1', help='Path to the first document file (original) - supports PDF, DOCX, XLSX, PPTX')
+    parser.add_argument('file2', help='Path to the second document file (modified) - supports PDF, DOCX, XLSX, PPTX')
     
     args = parser.parse_args()
     
@@ -955,7 +1140,7 @@ The tool will:
         sys.exit(1)
     
     try:
-        comparator = PDFComparator()
+        comparator = DocumentComparator()
         report_path = comparator.compare_pdfs(args.file1, args.file2)
         print(f"\nOpen the report in your browser: file://{os.path.abspath(report_path)}")
         
