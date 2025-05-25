@@ -2,18 +2,14 @@
 import os
 import sys
 import argparse
-import time
 from datetime import datetime
 import cv2
 import numpy as np
 import pytesseract
-import easyocr
 from pdf2image import convert_from_path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import difflib
 from jinja2 import Template
-import re
-import shutil
 from fuzzywuzzy import fuzz
 from docx import Document
 from fpdf import FPDF
@@ -110,6 +106,7 @@ class PDFComparer:
             self.pdf2_text = []
             self.diff_images = []
             self.word_diff_images = []
+            self.visual_diff_images = []
         except Exception as e:
             logging.error(f"Error initializing PDFComparer: {e}")
             raise
@@ -164,60 +161,51 @@ class PDFComparer:
             logging.error(f"Error during text extraction: {e}")
             raise
 
-    def find_word_differences(self, text1, text2):
+    def find_word_differences(self, text1, text2, by_line=False):
         """
-        Find word-level differences between two text strings using improved matching
-        
+        Find differences between two text strings using Myers' algorithm (via difflib.SequenceMatcher).
+        If by_line is True, compare line by line; otherwise, compare word by word.
         Returns:
             dict: Contains 'insertions', 'deletions', and 'modifications' lists
         """
-        # Split texts into words - improved tokenization
-        words1 = re.findall(r'\S+|\n', text1)
-        words2 = re.findall(r'\S+|\n', text2)
-        
-        # Normalize words to improve matching
-        norm_words1 = [w.strip().lower() for w in words1]
-        norm_words2 = [w.strip().lower() for w in words2]
-        
-        # Use SequenceMatcher for better alignment
-        matcher = difflib.SequenceMatcher(None, norm_words1, norm_words2)
-        
+        import string
+        def normalize(s):
+            # Lowercase, strip, and remove punctuation for better matching
+            return s.lower().strip().translate(str.maketrans('', '', string.punctuation))
+
+        if by_line:
+            seq1 = [normalize(line) for line in text1.splitlines() if line.strip()]
+            seq2 = [normalize(line) for line in text2.splitlines() if line.strip()]
+        else:
+            seq1 = [normalize(word) for word in text1.split() if word.strip()]
+            seq2 = [normalize(word) for word in text2.split() if word.strip()]
+
+        matcher = difflib.SequenceMatcher(None, seq1, seq2, autojunk=False)
         insertions = []
         deletions = []
         modifications = []
-        
-        # Process the opcodes to identify differences
+
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == 'replace':
-                # These are modifications - words that were replaced
                 for i in range(i1, i2):
-                    if i < len(words1):  # Safety check
-                        deletions.append(words1[i])
-                
+                    if i < len(seq1):
+                        deletions.append(seq1[i])
                 for j in range(j1, j2):
-                    if j < len(words2):  # Safety check
-                        insertions.append(words2[j])
-                        
-                # Pair modifications if counts match or close
-                mod_len = min(i2-i1, j2-j1)
+                    if j < len(seq2):
+                        insertions.append(seq2[j])
+                mod_len = min(i2 - i1, j2 - j1)
                 for k in range(mod_len):
-                    if (i1+k < len(words1) and j1+k < len(words2) and 
-                        fuzz.ratio(norm_words1[i1+k], norm_words2[j1+k]) < 85):
-                        # Only mark as modification if similarity below threshold
-                        modifications.append((words1[i1+k], words2[j1+k]))
-                        
+                    if i1 + k < len(seq1) and j1 + k < len(seq2):
+                        modifications.append((seq1[i1 + k], seq2[j1 + k]))
             elif tag == 'delete':
-                # Words in first sequence but not in second
                 for i in range(i1, i2):
-                    if i < len(words1):
-                        deletions.append(words1[i])
-                    
+                    if i < len(seq1):
+                        deletions.append(seq1[i])
             elif tag == 'insert':
-                # Words in second sequence but not in first
                 for j in range(j1, j2):
-                    if j < len(words2):
-                        insertions.append(words2[j])
-                        
+                    if j < len(seq2):
+                        insertions.append(seq2[j])
+
         return {
             'insertions': insertions,
             'deletions': deletions,
@@ -313,15 +301,55 @@ class PDFComparer:
             logging.error(f"Error creating annotated images: {e}")
             raise
     
+    def create_visual_diff_images(self):
+        """Create pixel-by-pixel visual diff images for each page."""
+        try:
+            logging.info("Creating pixel-by-pixel visual diff images...")
+            self.visual_diff_images = []
+            for page_num in range(len(self.pdf1_images)):
+                img1 = self.pdf1_images[page_num].copy()
+                img2 = self.pdf2_images[page_num].copy()
+                img1_cv = cv2.cvtColor(np.array(img1), cv2.COLOR_RGB2BGR)
+                img2_cv = cv2.cvtColor(np.array(img2), cv2.COLOR_RGB2BGR)
+
+                # Ensure same size
+                h = max(img1_cv.shape[0], img2_cv.shape[0])
+                w = max(img1_cv.shape[1], img2_cv.shape[1])
+                def pad_img(img, h, w):
+                    pad_h = h - img.shape[0]
+                    pad_w = w - img.shape[1]
+                    return cv2.copyMakeBorder(img, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=[255,255,255])
+                img1_cv = pad_img(img1_cv, h, w)
+                img2_cv = pad_img(img2_cv, h, w)
+
+                # Compute absolute difference
+                diff = cv2.absdiff(img1_cv, img2_cv)
+                # Highlight differences in magenta (where diff is significant)
+                gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+                _, mask = cv2.threshold(gray, 25, 255, cv2.THRESH_BINARY)
+                visual_diff = img2_cv.copy()
+                visual_diff[mask > 0] = [255, 0, 255]  # Magenta for changed pixels
+                # Overlay magenta on top of img2
+                overlay = img2_cv.copy()
+                overlay[mask > 0] = [255, 0, 255]
+                cv2.addWeighted(overlay, 0.5, img2_cv, 0.5, 0, visual_diff)
+
+                visual_diff_path = os.path.join(self.image_dir, f"visual_diff_{page_num}.png")
+                cv2.imwrite(visual_diff_path, visual_diff)
+                self.visual_diff_images.append(visual_diff_path)
+        except Exception as e:
+            logging.error(f"Error creating visual diff images: {e}")
+            raise
+
     def generate_html_report(self):
-        """Generate an HTML report with the comparison results, including a summary of changes."""
+        """Generate an HTML report with the comparison results, including a summary of changes and visual diffs."""
         try:
             html_template = """
             <!DOCTYPE html>
-            <html lang="en">
+            <html lang=\"en\">
             <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <meta charset=\"UTF-8\">
+                <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
                 <title>PDF Comparison Report</title>
                 <style>
                     body {
@@ -362,7 +390,7 @@ class PDFComparer:
                         border-radius: 3px;
                         text-align: center;
                     }
-                    .diff-view, .word-diff-view {
+                    .diff-view, .word-diff-view, .visual-diff-view {
                         margin-bottom: 30px;
                     }
                     .tabs {
@@ -426,18 +454,18 @@ class PDFComparer:
                 </style>
             </head>
             <body>
-                <div class="header">
+                <div class=\"header\">
                     <h1>PDF Comparison Report</h1>
                     <p>Generated on {{ timestamp }}</p>
                 </div>
                 
-                <div class="container">
-                    <div class="file-info">
-                        <div class="file-name">Left PDF: {{ pdf1_name }}</div>
-                        <div class="file-name">Right PDF: {{ pdf2_name }}</div>
+                <div class=\"container\">
+                    <div class=\"file-info\">
+                        <div class=\"file-name\">Left PDF: {{ pdf1_name }}</div>
+                        <div class=\"file-name\">Right PDF: {{ pdf2_name }}</div>
                     </div>
 
-                    <div class="summary">
+                    <div class=\"summary\">
                         <h2>Summary of Changes</h2>
                         <ul>
                             {% for change in changes %}
@@ -446,33 +474,41 @@ class PDFComparer:
                         </ul>
                     </div>
                     
-                    <div class="legend">
+                    <div class=\"legend\">
                         <h3>Legend</h3>
-                        <div class="legend-item"><span class="color-box" style="background-color: rgba(0,255,0,0.3);"></span> Added text (green)</div>
-                        <div class="legend-item"><span class="color-box" style="background-color: rgba(255,0,0,0.3);"></span> Deleted text (red)</div>
-                        <div class="legend-item"><span class="color-box" style="background-color: rgba(255,165,0,0.3);"></span> Modified text (orange)</div>
+                        <div class=\"legend-item\"><span class=\"color-box\" style=\"background-color: rgba(0,255,0,0.3);\"></span> Added text (green)</div>
+                        <div class=\"legend-item\"><span class=\"color-box\" style=\"background-color: rgba(255,0,0,0.3);\"></span> Deleted text (red)</div>
+                        <div class=\"legend-item\"><span class=\"color-box\" style=\"background-color: rgba(255,165,0,0.3);\"></span> Modified text (orange)</div>
+                        <div class=\"legend-item\"><span class=\"color-box\" style=\"background-color: rgba(255,0,255,0.3);\"></span> Visual diff (magenta overlay)</div>
                     </div>
                     
                     {% for page_num in range(total_pages) %}
-                    <div class="comparison-section">
-                        <div class="page-title">
+                    <div class=\"comparison-section\">
+                        <div class=\"page-title\">
                             <h2>Page {{ page_num + 1 }}</h2>
                         </div>
                         
-                        <div class="tabs">
-                            <div class="tab active" onclick="showTab({{ page_num }}, 'word-diff')">Word Differences</div>
-                            <div class="tab" onclick="showTab({{ page_num }}, 'diff')">Side by Side</div>
+                        <div class=\"tabs\">
+                            <div class=\"tab active\" onclick=\"showTab({{ page_num }}, 'word-diff')\">Word Differences</div>
+                            <div class=\"tab\" onclick=\"showTab({{ page_num }}, 'diff')\">Side by Side</div>
+                            <div class=\"tab\" onclick=\"showTab({{ page_num }}, 'visual-diff')\">Visual Diff</div>
                         </div>
                         
-                        <div class="tab-content active" id="tab-{{ page_num }}-word-diff">
-                            <div class="word-diff-view">
-                                <img src="{{ word_diff_images[page_num] }}" alt="Word difference view for page {{ page_num + 1 }}">
+                        <div class=\"tab-content active\" id=\"tab-{{ page_num }}-word-diff\">
+                            <div class=\"word-diff-view\">
+                                <img src=\"{{ word_diff_images[page_num] }}\" alt=\"Word difference view for page {{ page_num + 1 }}\">
                             </div>
                         </div>
                         
-                        <div class="tab-content" id="tab-{{ page_num }}-diff">
-                            <div class="diff-view">
-                                <img src="{{ diff_images[page_num] }}" alt="Side by side difference view for page {{ page_num + 1 }}">
+                        <div class=\"tab-content\" id=\"tab-{{ page_num }}-diff\">
+                            <div class=\"diff-view\">
+                                <img src=\"{{ diff_images[page_num] }}\" alt=\"Side by side difference view for page {{ page_num + 1 }}\">
+                            </div>
+                        </div>
+
+                        <div class=\"tab-content\" id=\"tab-{{ page_num }}-visual-diff\">
+                            <div class=\"visual-diff-view\">
+                                <img src=\"{{ visual_diff_images[page_num] }}\" alt=\"Visual diff for page {{ page_num + 1 }}\">
                             </div>
                         </div>
                     </div>
@@ -482,7 +518,7 @@ class PDFComparer:
                 <script>
                     function showTab(pageNum, tabName) {
                         // Hide all tab contents
-                        const tabContents = document.querySelectorAll(`[id^="tab-${pageNum}-"]`);
+                        const tabContents = document.querySelectorAll(`[id^=\"tab-${pageNum}-\"]`);
                         tabContents.forEach(content => {
                             content.classList.remove('active');
                         });
@@ -496,16 +532,16 @@ class PDFComparer:
                         for (let i = 0; i < tabs.length; i++) {
                             tabs[i].classList.remove('active');
                         }
-                        
-                        // Set clicked tab as active
-                        const clickedTabIndex = tabName === 'word-diff' ? 0 : 1;
+                        let clickedTabIndex = 0;
+                        if (tabName === 'word-diff') clickedTabIndex = 0;
+                        else if (tabName === 'diff') clickedTabIndex = 1;
+                        else if (tabName === 'visual-diff') clickedTabIndex = 2;
                         tabs[clickedTabIndex].classList.add('active');
                     }
                 </script>
             </body>
             </html>
             """
-            
             # Prepare data for template
             changes = []
             for page_num in range(len(self.pdf1_text)):
@@ -516,7 +552,6 @@ class PDFComparer:
                     changes.append(f"Page {page_num + 1}: {len(diff_dict['deletions'])} deletions.")
                 if diff_dict['modifications']:
                     changes.append(f"Page {page_num + 1}: {len(diff_dict['modifications'])} modifications.")
-            
             template_data = {
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 'pdf1_name': os.path.basename(self.pdf1_path),
@@ -524,18 +559,16 @@ class PDFComparer:
                 'total_pages': len(self.pdf1_images),
                 'diff_images': [os.path.relpath(path, self.output_dir) for path in self.diff_images],
                 'word_diff_images': [os.path.relpath(path, self.output_dir) for path in self.word_diff_images],
+                'visual_diff_images': [os.path.relpath(path, self.output_dir) for path in self.visual_diff_images],
                 'changes': changes
             }
-            
             # Generate HTML
             template = Template(html_template)
             html_content = template.render(**template_data)
-            
             # Write to file
             html_path = os.path.join(self.output_dir, "pdf_diff.html")
             with open(html_path, 'w') as f:
                 f.write(html_content)
-                
             logging.info(f"\nComparison complete! HTML report generated at: {html_path}")
             return html_path
         except Exception as e:
@@ -546,11 +579,11 @@ class PDFComparer:
         """Process the PDFs and generate comparison"""
         try:
             logging.info(f"Starting PDF comparison: {os.path.basename(self.pdf1_path)} vs {os.path.basename(self.pdf2_path)}")
-
             # Main workflow
             self.convert_pdfs_to_images()
             self.apply_text_extraction()  # Use direct text extraction instead of OCR
             self.create_annotated_images()
+            self.create_visual_diff_images()
             return self.generate_html_report()
         except Exception as e:
             logging.error(f"Error during PDF comparison process: {e}")
