@@ -1,4 +1,4 @@
-# Document Comparison Tool
+# DocDelta
 
 A comprehensive document comparison tool that performs visual and textual analysis of various document formats (PDF, DOCX, XLSX, PPTX), highlighting differences with color-coded annotations.
 
